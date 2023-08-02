@@ -1,3 +1,10 @@
+## SWIN-IR-TEXT
+
+Fork of SWIN2SR to use add cross attention with text to the discriminator and the transformer.
+
+
+
+
 # Swin2SR @ ECCV 2022 AIM Workshop
 
 ## [Swin2SR: SwinV2 Transformer for Compressed Image Super-Resolution and Restoration](https://arxiv.org/abs/2209.11345)
