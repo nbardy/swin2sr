@@ -1,0 +1,71 @@
+from beartype import beartype
+from beartype.typing import List, Optional, Tuple, Dict, Union, Iterable
+
+from gigagan_pytorch.version import __version__
+from gigagan_pytorch.open_clip import OpenClipAdapter
+from gigagan_pytorch.optimizer import get_optimizer
+
+
+# Lucidrain's text encoder pattern
+# Common in many papers to project down clip embeddings to a given size and layer for cross attention
+class TextEncoder(nn.Module):
+    @beartype
+    def __init__(
+        self,
+        *,
+        dim,
+        depth,
+        clip: Optional[OpenClipAdapter] = None,
+        dim_head = 64,
+        heads = 8,
+    ):
+        super().__init__()
+        self.dim = dim
+
+        if not exists(clip):
+            clip = OpenClipAdapter()
+
+        self.clip = clip
+        set_requires_grad_(clip, False)
+
+        self.learned_global_token = nn.Parameter(torch.randn(dim))
+
+        self.project_in = nn.Linear(clip.dim_latent, dim) if clip.dim_latent != dim else nn.Identity()
+
+        self.transformer = Transformer(
+            dim = dim,
+            depth = depth,
+            dim_head = dim_head,
+            heads = heads
+        )
+
+    @beartype
+    def forward(
+        self,
+        texts: Optional[List[str]] = None,
+        text_encodings: Optional[Tensor] = None
+    ):
+        assert exists(texts) ^ exists(text_encodings)
+
+        if not exists(text_encodings):
+            with torch.no_grad():
+                self.clip.eval()
+                _, text_encodings = self.clip.embed_texts(texts)
+
+        mask = (text_encodings != 0.).any(dim = -1)
+
+        text_encodings = self.project_in(text_encodings)
+
+        mask_with_global = F.pad(mask, (1, 0), value = True)
+
+        batch = text_encodings.shape[0]
+        global_tokens = repeat(self.learned_global_token, 'd -> b d', b = batch)
+
+        text_encodings, ps = pack([global_tokens, text_encodings], 'b * d')
+
+        text_encodings = self.transformer(text_encodings, mask = mask_with_global)
+
+        global_tokens, text_encodings = unpack(text_encodings, ps, 'b * d')
+
+        return global_tokens, text_encodings, mask
+
