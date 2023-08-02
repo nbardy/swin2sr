@@ -12,6 +12,21 @@ import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
 
+# TODO: Should take CLIP embeddings and project with an MLP
+class ClipConditioningEncoder(nn.Module):
+    def __init__(self, output_dim=None, depth=4):
+
+        # TODO: Created shared frozen CLIP text and image encoders
+        layers = []
+        for i in range(10):
+            layers.append(linear())
+        
+        self.encoder = nnSequential(layers)
+
+    def forward(self, x):
+        return self.encoder(self.clip(x))
+
+
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
@@ -59,8 +74,17 @@ def window_reverse(windows, window_size, H, W):
     x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
+    
+# TODO: Me 
+class WindowedCrossAttention(nn.Module):
+    def __init__(self): # TODO
+        return  
 
-class WindowAttention(nn.Module):
+    def forward(self, x): # TODO
+        return 
+        
+
+class WindowedAttention(nn.Module):
     r""" Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
     Args:
@@ -132,19 +156,24 @@ class WindowAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, mask=None):
+    def forward(self, x, y=None, mask=None):
         """
         Args:
-            x: input features with shape of (num_windows*B, N, C)
+            x: input features with shape of (num_windows*B, N, C) serving as queries
+            y: input features with shape of (num_windows*B, N, C) serving as keys/values. 
+               If None, y will be set to x (self attention).
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
+        y = x if y is None else y
         qkv_bias = None
         if self.q_bias is not None:
             qkv_bias = torch.cat((self.q_bias, torch.zeros_like(self.v_bias, requires_grad=False), self.v_bias))
-        qkv = F.linear(input=x, weight=self.qkv.weight, bias=qkv_bias)
-        qkv = qkv.reshape(B_, N, 3, self.num_heads, -1).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+
+        q = F.linear(input=x, weight=self.qkv.weight[:, :C], bias=(None if qkv_bias is None else qkv_bias[:C]))
+        kv = F.linear(input=y, weight=self.qkv.weight[:, C:], bias=(None if qkv_bias is None else qkv_bias[C:]))
+        kv = kv.reshape(B_, N, 2, self.num_heads, -1).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
 
         # cosine attention
         attn = (F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1))
@@ -171,6 +200,7 @@ class WindowAttention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+        
         return x
 
     def extra_repr(self) -> str:
@@ -189,6 +219,14 @@ class WindowAttention(nn.Module):
         # x = self.proj(x)
         flops += N * self.dim * self.dim
         return flops
+
+class WindowedCrossAttention(WindowedAttention):
+    def forward(self, x, y, mask=None):
+        return super().forward(x, y=y, mask=mask)
+
+class WindowedSelfAttention(WindowedAttention):
+    def forward(self, x, mask=None):
+        return super().forward(x, y=None, mask=mask)
 
 class SwinTransformerBlock(nn.Module):
     r""" Swin Transformer Block.
@@ -225,7 +263,7 @@ class SwinTransformerBlock(nn.Module):
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention(
+        self.attn = WindowedAttention(
             dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
             qkv_bias=qkv_bias, attn_drop=attn_drop, proj_drop=drop,
             pretrained_window_size=to_2tuple(pretrained_window_size))
@@ -388,6 +426,7 @@ class BasicLayer(nn.Module):
         downsample (nn.Module | None, optional): Downsample layer at the end of the layer. Default: None
         use_checkpoint (bool): Whether to use checkpointing to save memory. Default: False.
         pretrained_window_size (int): Local window size in pre-training.
+        number_of_cross_attention_layers: (int)
     """
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
@@ -702,6 +741,7 @@ class Swin2SR(nn.Module):
                  window_size=7, mlp_ratio=4., qkv_bias=True, 
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
                  norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
+                 conditioning_encoder_hf=None, conditioning_encoder=None,
                  use_checkpoint=False, upscale=2, img_range=1., upsampler='', resi_connection='1conv',
                  **kwargs):
         super(Swin2SR, self).__init__()
@@ -773,9 +813,33 @@ class Swin2SR(nn.Module):
                          img_size=img_size,
                          patch_size=patch_size,
                          resi_connection=resi_connection
-
                          )
+            
             self.layers.append(layer)
+            
+            if self.cross_attention_dim:  
+                self.conditioning_encoder = ClipConditioningEncoder(output_dim=self.cross_attention_dim)
+            if self.cross_attention_dim_hf:
+                self.conditioning_encoder = ClipConditioningEncoder(output_dim=self.cross_attention_dim_hf)
+                
+           # TODO: 1. Create cross attention layer(s))(hf) with the size of the ConditioningEncoder's
+           #       2. Write tiny ConditioningEncoder, it wraps CLIP to project to a smaller size with MLP
+            if self.cross_attention_layers:
+                # Make every layer none by default
+                self.cross_attention = map(range(self.num_layers), lambda x: None)
+                
+                # Add layers for where they're set
+                for i in cross_attention_layers:
+                    self.cross_attention_layers[i] = WindowedCrossAttention(q_dim=embed_dim, k_qim=self.cross_attention_dim)
+            
+            if self.cross_attention_layers_hf:
+                self.cross_attention = map(range(self.num_layers), lambda x: None) 
+               
+                # Add layers for where they're set
+                for i in cross_attention_layers_hf:
+                    self.cross_attention_layers[i] = WindowedCrossAttention(q_kim=embed_dim,k_dim=self.cross_attention_dim_hf)
+
+
             
         if self.upsampler == 'pixelshuffle_hf':
             self.layers_hf = nn.ModuleList()
@@ -796,8 +860,8 @@ class Swin2SR(nn.Module):
                              img_size=img_size,
                              patch_size=patch_size,
                              resi_connection=resi_connection
-
                              )
+                
                 self.layers_hf.append(layer)
                         
         self.norm = norm_layer(self.num_features)
@@ -891,30 +955,48 @@ class Swin2SR(nn.Module):
         x = F.pad(x, (0, mod_pad_w, 0, mod_pad_h), 'reflect')
         return x
 
-    def forward_features(self, x):
+    def forward_features(self, x, cond=None):
         x_size = (x.shape[2], x.shape[3])
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
+            
         x = self.pos_drop(x)
 
-        for layer in self.layers:
+        if self.cross_attention_layers:
+            c = self.conditioning_encoder(cond)
+
+        for i, layer in enumerate(self.layer):
             x = layer(x, x_size)
+
+            if self.cross_attention_layers and cond:  
+                cx_layer = self.cross_attention[i]
+                if cx_layer:
+                    x = cx_layer(x, x_size, c)
 
         x = self.norm(x)  # B L C
         x = self.patch_unembed(x, x_size)
 
         return x
     
-    def forward_features_hf(self, x):
+    def forward_features_hf(self, x, cond=None):
         x_size = (x.shape[2], x.shape[3])
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
         x = self.pos_drop(x)
 
+        if self.cross_attention_layers_hf:
+            c = self.conditioning_encoder_hf(cond)
+
         for layer in self.layers_hf:
             x = layer(x, x_size)
+
+            # Cross attention interleaved as specified
+            if self.cross_attention_layers_hf and cond:
+                cx_layer = self.cross_attention_hf[i]
+                if cx_layer:
+                    x = cx_layer(x, x_size, c)
 
         x = self.norm(x)  # B L C
         x = self.patch_unembed(x, x_size)
