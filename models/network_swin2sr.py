@@ -11,21 +11,7 @@ import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
 from timm.models.layers import DropPath, to_2tuple, trunc_normal_
 
-
-# TODO: Should take CLIP embeddings and project with an MLP
-class ClipConditioningEncoder(nn.Module):
-    def __init__(self, output_dim=None, depth=4):
-
-        # TODO: Created shared frozen CLIP text and image encoders
-        layers = []
-        for i in range(10):
-            layers.append(linear())
-        
-        self.encoder = nnSequential(layers)
-
-    def forward(self, x):
-        return self.encoder(self.clip(x))
-
+from text_encoder import TextEncoder
 
 class Mlp(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -74,15 +60,7 @@ def window_reverse(windows, window_size, H, W):
     x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
     x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
     return x
-    
-# TODO: Me 
-class WindowedCrossAttention(nn.Module):
-    def __init__(self): # TODO
-        return  
 
-    def forward(self, x): # TODO
-        return 
-        
 
 class WindowedAttention(nn.Module):
     r""" Window based multi-head self attention (W-MSA) module with relative position bias.
